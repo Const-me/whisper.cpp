@@ -139,15 +139,28 @@ ggml_fp16_t ggml_fp32_to_fp16(float x) {
 // ref: https://github.com/Maratyszcza/FP16
 
 #ifdef __F16C__
-float ggml_fp16_to_fp32(ggml_fp16_t h) {
-    return _cvtsh_ss(h);
-}
-ggml_fp16_t ggml_fp32_to_fp16(float f) {
-    return _cvtss_sh(f, 0);
+
+float ggml_fp16_to_fp32( ggml_fp16_t h )
+{
+	static_assert( sizeof( ggml_fp16_t ) == 2, "sizeof" );
+
+	__m128i iv = _mm_cvtsi32_si128( h );
+	__m128 fv = _mm_cvtph_ps( iv );
+	return _mm_cvtss_f32( fv );
 }
 
-#define GGML_FP16_TO_FP32(x) _cvtsh_ss(x)
-#define GGML_FP32_TO_FP16(x) _cvtss_sh(x, 0)
+ggml_fp16_t ggml_fp32_to_fp16( float f )
+{
+	static_assert( sizeof( ggml_fp16_t ) == 2, "sizeof" );
+
+	__m128 fv = _mm_set_ss( f );
+	__m128i iv = _mm_cvtps_ph( fv, 0 );
+	uint32_t i32 = (uint32_t)_mm_cvtsi128_si32( iv );
+	return (ggml_fp16_t)(uint16_t)i32;
+}
+
+#define GGML_FP16_TO_FP32(x) ggml_fp16_to_fp32(x)
+#define GGML_FP32_TO_FP16(x) ggml_fp32_to_fp16(x)
 
 #else
 
