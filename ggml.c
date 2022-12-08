@@ -514,6 +514,95 @@ inline static void ggml_vec_dot_f32(const int n, float * restrict s, const float
     *s = sumf;
 }
 
+#ifdef __AVX__
+#ifndef _MSC_VER
+#define __forceinline inline __attribute__((always_inline))
+#endif
+
+// Compute x * y + z, using FMA in AVX2 builds
+__forceinline void mulAcc( __m256* acc, __m256 x, __m256 y )
+{
+#ifdef __AVX2__
+	*acc = _mm256_fmadd_ps( x, y, *acc );
+#else
+	*acc = _mm256_add_ps( _mm256_mul_ps( x, y ), *acc );
+#endif
+}
+
+// Load 8 FP16 numbers from x and y each, upcast to FP32, then multiply/accumulate
+__forceinline void dotFp16Block( __m256* acc, ggml_fp16_t* x, ggml_fp16_t* y )
+{
+	__m128i ix, iy;
+	__m256 fx, fy;
+
+	ix = _mm_loadu_si128( ( __m128i* )( x ) );
+	iy = _mm_loadu_si128( ( __m128i* )( y ) );
+
+	fx = _mm256_cvtph_ps( ix );
+	fy = _mm256_cvtph_ps( iy );
+
+	mulAcc( acc, fx, fy );
+}
+
+// Load less than 8 FP16 numbers from x and y each, upcast to FP32, then multiply/accumulate
+__forceinline void dotFp16Partial( __m256* acc, ggml_fp16_t* x, ggml_fp16_t* y, uint32_t count )
+{
+	__m128i ix, iy;
+	__m256 fx, fy;
+	static_assert( sizeof( ggml_fp16_t ) == 2, "sizeof" );
+
+	switch( count )
+	{
+	case 1: // load 2 bytes
+		ix = _mm_cvtsi32_si128( *x );
+		iy = _mm_cvtsi32_si128( *y );
+		break;
+	case 2: // load 4 bytes
+		ix = _mm_cvtsi32_si128( *(const int*)x );
+		iy = _mm_cvtsi32_si128( *(const int*)y );
+		break;
+	case 3: // load 6 bytes
+		ix = _mm_cvtsi32_si128( *(const int*)x );
+		iy = _mm_cvtsi32_si128( *(const int*)y );
+		ix = _mm_insert_epi16( ix, x[ 2 ], 2 );
+		iy = _mm_insert_epi16( iy, y[ 2 ], 2 );
+		break;
+	case 4: // load 8 bytes
+		ix = _mm_cvtsi64_si128( *(const int64_t*)x );
+		iy = _mm_cvtsi64_si128( *(const int64_t*)y );
+		break;
+	case 5: // load 10 bytes
+		ix = _mm_cvtsi64_si128( *(const int64_t*)x );
+		iy = _mm_cvtsi64_si128( *(const int64_t*)y );
+		ix = _mm_insert_epi16( ix, x[ 4 ], 4 );
+		iy = _mm_insert_epi16( iy, y[ 4 ], 4 );
+		break;
+	case 6: // load 12 bytes
+		ix = _mm_cvtsi64_si128( *(const int64_t*)x );
+		iy = _mm_cvtsi64_si128( *(const int64_t*)y );
+		ix = _mm_insert_epi32( ix, *(const int*)( x + 4 ), 2 );
+		iy = _mm_insert_epi32( iy, *(const int*)( y + 4 ), 2 );
+		break;
+	case 7: // load 14 bytes
+		ix = _mm_cvtsi64_si128( *(const int64_t*)x );
+		iy = _mm_cvtsi64_si128( *(const int64_t*)y );
+		ix = _mm_insert_epi32( ix, *(const int*)( x + 4 ), 2 );
+		iy = _mm_insert_epi32( iy, *(const int*)( y + 4 ), 2 );
+		ix = _mm_insert_epi16( ix, x[ 6 ], 6 );
+		iy = _mm_insert_epi16( iy, y[ 6 ], 6 );
+		break;
+	default:
+		return;
+	}
+
+	fx = _mm256_cvtph_ps( ix );
+	fy = _mm256_cvtph_ps( iy );
+
+	mulAcc( acc, fx, fy );
+}
+#endif
+
+
 inline static void ggml_vec_dot_f16(const int n, float * restrict s, ggml_fp16_t * restrict x, ggml_fp16_t * restrict y) {
     ggml_float sumf = 0.0;
 #ifdef __ARM_NEON
@@ -619,94 +708,59 @@ inline static void ggml_vec_dot_f16(const int n, float * restrict s, ggml_fp16_t
     for (int i = n32; i < n; ++i) {
         sumf += GGML_FP16_TO_FP32(x[i])*GGML_FP16_TO_FP32(y[i]);
     }
-#elif defined(__AVX2__)
-    // AVX 256-bit
-    const int n32 = (n & ~31);
-
-    __m256 sum0 = _mm256_setzero_ps();
-    __m256 sum1 = _mm256_setzero_ps();
-    __m256 sum2 = _mm256_setzero_ps();
-    __m256 sum3 = _mm256_setzero_ps();
-
-    __m256 x0, x1, x2, x3;
-    __m256 y0, y1, y2, y3;
-
-    for (int i = 0; i < n32; i += 32) {
-        x0 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 0 )));
-        x1 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 8 )));
-        x2 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 16)));
-        x3 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 24)));
-
-        y0 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 0 )));
-        y1 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 8 )));
-        y2 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 16)));
-        y3 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 24)));
-
-        sum0 = _mm256_fmadd_ps(x0, y0, sum0);
-        sum1 = _mm256_fmadd_ps(x1, y1, sum1);
-        sum2 = _mm256_fmadd_ps(x2, y2, sum2);
-        sum3 = _mm256_fmadd_ps(x3, y3, sum3);
-    }
-
-    const __m256 sum01 = _mm256_add_ps(sum0, sum1);
-    const __m256 sum23 = _mm256_add_ps(sum2, sum3);
-    const __m256 sum0123 = _mm256_add_ps(sum01, sum23);
-
-    const __m128 r4 = _mm_add_ps(_mm256_castps256_ps128(sum0123), _mm256_extractf128_ps(sum0123, 1));
-    const __m128 r2 = _mm_add_ps(r4, _mm_movehl_ps(r4, r4));
-    const __m128 r1 = _mm_add_ss(r2, _mm_movehdup_ps(r2));
-
-    sumf = _mm_cvtss_f32(r1);
-
-    // leftovers
-    for (int i = n32; i < n; ++i) {
-        //GGML_ASSERT(false);
-        sumf += GGML_FP16_TO_FP32(x[i])*GGML_FP16_TO_FP32(y[i]);
-    }
 #elif defined(__AVX__)
-    // AVX 256-bit
-    const int n32 = (n & ~31);
+	// AVX 256-bit
+	const ggml_fp16_t* const xEndBlock = x + ( (uint32_t)n & ~31ul );
+	const int remainder = n % 32;
 
     __m256 sum0 = _mm256_setzero_ps();
     __m256 sum1 = _mm256_setzero_ps();
     __m256 sum2 = _mm256_setzero_ps();
     __m256 sum3 = _mm256_setzero_ps();
 
-    __m256 x0, x1, x2, x3;
-    __m256 y0, y1, y2, y3;
+	// The loop handles majority of the data, 32 elements per iteration
+	while( x < xEndBlock )
+	{
+		dotFp16Block( &sum0, x, y );
+		dotFp16Block( &sum1, x + 8, y + 8 );
+		dotFp16Block( &sum2, x + 16, y + 16 );
+		dotFp16Block( &sum3, x + 24, y + 24 );
+		x += 32;
+		y += 32;
+	}
 
-    for (int i = 0; i < n32; i += 32) {
-        x0 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 0 )));
-        x1 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 8 )));
-        x2 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 16)));
-        x3 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(x + i + 24)));
+	if( remainder != 0 )
+	{
+		// Handle the remainder
 
-        y0 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 0 )));
-        y1 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 8 )));
-        y2 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 16)));
-        y3 = _mm256_cvtph_ps(_mm_loadu_si128((__m128i*)(y + i + 24)));
+		if( remainder & 16 )
+		{
+			dotFp16Block( &sum0, x, y );
+			dotFp16Block( &sum1, x + 8, y + 8 );
+			x += 16;
+			y += 16;
+		}
 
-	sum0 = _mm256_add_ps(_mm256_mul_ps(x0, y0), sum0);
-	sum1 = _mm256_add_ps(_mm256_mul_ps(x1, y1), sum1);
-	sum2 = _mm256_add_ps(_mm256_mul_ps(x2, y2), sum2);
-	sum3 = _mm256_add_ps(_mm256_mul_ps(x3, y3), sum3);
-    }
+		if( remainder & 8 )
+		{
+			dotFp16Block( &sum2, x, y );
+			x += 8;
+			y += 8;
+		}
 
-    const __m256 sum01 = _mm256_add_ps(sum0, sum1);
-    const __m256 sum23 = _mm256_add_ps(sum2, sum3);
-    const __m256 sum0123 = _mm256_add_ps(sum01, sum23);
+		dotFp16Partial( &sum3, x, y, (uint32_t)remainder % 8 );
+	}
 
-    const __m128 r4 = _mm_add_ps(_mm256_castps256_ps128(sum0123), _mm256_extractf128_ps(sum0123, 1));
-    const __m128 r2 = _mm_add_ps(r4, _mm_movehl_ps(r4, r4));
-    const __m128 r1 = _mm_add_ss(r2, _mm_movehdup_ps(r2));
+	// Add these 32 accumulators into a single FP32 scalar
+	const __m256 sum01 = _mm256_add_ps(sum0, sum1);
+	const __m256 sum23 = _mm256_add_ps(sum2, sum3);
+	const __m256 sum0123 = _mm256_add_ps(sum01, sum23);
 
-    sumf = _mm_cvtss_f32(r1);
+	const __m128 r4 = _mm_add_ps(_mm256_castps256_ps128(sum0123), _mm256_extractf128_ps(sum0123, 1));
+	const __m128 r2 = _mm_add_ps(r4, _mm_movehl_ps(r4, r4));
+	const __m128 r1 = _mm_add_ss(r2, _mm_movehdup_ps(r2));
 
-    // leftovers
-    for (int i = n32; i < n; ++i) {
-        //GGML_ASSERT(false);
-        sumf += GGML_FP16_TO_FP32(x[i])*GGML_FP16_TO_FP32(y[i]);
-    }
+	sumf = _mm_cvtss_f32(r1);
 #elif defined(__wasm_simd128__)
     // WASM 128-bit
     const int n16 = (n & ~15);
