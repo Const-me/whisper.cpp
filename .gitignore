@@ -11,10 +11,6 @@ build-release/
 build-sanitize-addr/
 build-sanitize-thread/
 
-main
-stream
-command
-bench
 sync.sh
 libwhisper.so
 compile_commands.json
@@ -26,3 +22,4 @@ examples/whisper.objc/whisper.objc.xcodeproj/project.xcworkspace/xcuserdata
 Windows/whisper/x64/
 Windows/x64/
 *.user
+Windows/main/x64/
